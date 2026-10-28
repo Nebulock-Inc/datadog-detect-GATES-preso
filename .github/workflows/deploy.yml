@@ -1,0 +1,66 @@
+name: Deploy password-protected deck
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Encrypt deck with StatiCrypt
+        env:
+          # Set in Settings > Secrets and variables > Actions > Secrets
+          STATICRYPT_PASSWORD: ${{ secrets.PRESO_PASSWORD }}
+        run: |
+          if [ -z "$STATICRYPT_PASSWORD" ]; then
+            echo "::error::The PRESO_PASSWORD repository secret is not set."
+            exit 1
+          fi
+          npx --yes staticrypt@3.5.4 index.html \
+            --directory _site \
+            --config false \
+            --short \
+            --template-title "GATES: Deciding When a Threat Hunt Becomes a Detection" \
+            --template-instructions "Enter the password to open the deck." \
+            --template-button "Unlock" \
+            --template-color-primary "#FF5E19" \
+            --template-color-secondary "#0A0A0A"
+          test -f _site/index.html
+          if grep -q "Introducing GATES" _site/index.html; then
+            echo "::error::Output still contains plaintext deck content. Aborting deploy."
+            exit 1
+          fi
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
