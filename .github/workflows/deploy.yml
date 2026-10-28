@@ -1,0 +1,80 @@
+name: Deploy password-protected deck
+
+# Only a push to main (i.e. a reviewed, merged PR) or a manual run can deploy.
+# No pull_request / pull_request_target triggers: branch code never runs with secrets.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Deny everything by default; the job below asks only for what it needs.
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest          # GitHub-hosted, ephemeral. Never a self-hosted runner.
+    timeout-minutes: 10
+    # PRESO_PASSWORD lives as an *environment* secret on github-pages, which only
+    # main can deploy to. Workflows pushed on other branches cannot read it.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read                # read the deck
+      pages: write                  # publish to Pages
+      id-token: write               # OIDC token required by deploy-pages
+    steps:
+      # Tip: pin these to full commit SHAs (see SECURITY.md).
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # don't leave the GITHUB_TOKEN in .git/config
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install StatiCrypt (exact version, no install scripts)
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts staticrypt@3.5.4
+
+      - name: Encrypt deck
+        env:
+          STATICRYPT_PASSWORD: ${{ secrets.PRESO_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ "${#STATICRYPT_PASSWORD}" -lt 20 ]; then
+            echo "::error::PRESO_PASSWORD is missing or shorter than 20 characters. Use a 5+ word passphrase."
+            exit 1
+          fi
+          ./node_modules/.bin/staticrypt index.html \
+            --directory _site \
+            --config false \
+            --remember false \
+            --template-title "GATES: Deciding When a Threat Hunt Becomes a Detection" \
+            --template-instructions "Enter the password to open the deck." \
+            --template-button "Unlock" \
+            --template-color-primary "#FF5E19" \
+            --template-color-secondary "#0A0A0A"
+          test -f _site/index.html
+          # Fail closed: refuse to publish if any plaintext deck content survived.
+          for marker in "Introducing GATES" "Live: athf hunt new" "Pass base first" "gx-layer" "tree-bar"; do
+            if grep -q "$marker" _site/index.html; then
+              echo "::error::Plaintext marker found in output ($marker). Aborting deploy."
+              exit 1
+            fi
+          done
+          # Publish only the encrypted page.
+          find _site -type f ! -name index.html -delete
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
